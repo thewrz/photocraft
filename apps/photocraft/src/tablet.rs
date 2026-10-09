@@ -36,9 +36,9 @@ pub fn install_macos(feed: &StylusFeed) -> Option<photocraft_tablet::macos::Moni
     photocraft_tablet::macos::Monitor::install(sink(feed.clone())).map_err(|e| log::warn!("{e}")).ok()
 }
 
-/// The display server to open the window on: the session's own, except Xwayland on Wayland when
-/// a pen is attached (see the module docs) and Xwayland can run the window: `$DISPLAY` is set
-/// and the X11 libraries are installed. `PHOTOCRAFT_NATIVE_WAYLAND=1` keeps native Wayland.
+/// The display server to open the window on: the session's own, except Xwayland on Wayland
+/// (local patch: upstream only with a pen attached) when Xwayland can run the window: `$DISPLAY`
+/// is set and the X11 libraries are installed. `PHOTOCRAFT_NATIVE_WAYLAND=1` keeps native Wayland.
 #[cfg(target_os = "linux")]
 pub fn display_session() -> DisplaySession {
     let var = |k: &str| std::env::var(k).ok();
@@ -46,7 +46,7 @@ pub fn display_session() -> DisplaySession {
     let pen = || std::fs::read_to_string("/proc/bus/input/devices").is_ok_and(|d| has_pen(&d));
     let x11_libs = || crate::linux_libs::available(DisplaySession::X11);
     if pen_needs_xwayland(session, var, pen, x11_libs) {
-        eprintln!("photocraft: pen found; opening the window through Xwayland, where the pen works (PHOTOCRAFT_NATIVE_WAYLAND=1 keeps Wayland)");
+        eprintln!("photocraft: opening the window through Xwayland, where file drops and pens work (PHOTOCRAFT_NATIVE_WAYLAND=1 keeps Wayland)");
         return DisplaySession::X11;
     }
     session
@@ -56,7 +56,10 @@ pub fn display_session() -> DisplaySession {
 #[cfg(any(target_os = "linux", test))]
 pub fn pen_needs_xwayland(session: DisplaySession, var: impl Fn(&str) -> Option<String>, pen: impl FnOnce() -> bool, x11_libs: impl FnOnce() -> bool) -> bool {
     let set = |k: &str| var(k).is_some_and(|v| !v.is_empty() && v != "0");
-    session == DisplaySession::Wayland && !set("PHOTOCRAFT_NATIVE_WAYLAND") && set("DISPLAY") && pen() && x11_libs()
+    // Local patch: with or without a pen. winit 0.30 has no Wayland file drag-and-drop (#386) and
+    // Xwayland has it. Drop this once upstream receives drops on native Wayland.
+    let _ = pen;
+    session == DisplaySession::Wayland && !set("PHOTOCRAFT_NATIVE_WAYLAND") && set("DISPLAY") && x11_libs()
 }
 
 /// `BTN_TOOL_PEN` (linux/input-event-codes.h): the key a pen tablet's stylus, a pen display's or
@@ -310,8 +313,9 @@ mod tests {
         };
         let wayland = [("WAYLAND_DISPLAY", "wayland-0"), ("DISPLAY", ":0")];
         assert!(pen_needs_xwayland(DisplaySession::Wayland, env(&wayland), || true, || true));
-        // No pen, no Xwayland, no X11 libraries, or the user keeps Wayland: native Wayland.
-        assert!(!pen_needs_xwayland(DisplaySession::Wayland, env(&wayland), || false, || true));
+        // Local patch: no pen needed, file drops need Xwayland too (#386).
+        assert!(pen_needs_xwayland(DisplaySession::Wayland, env(&wayland), || false, || true));
+        // No Xwayland, no X11 libraries, or the user keeps Wayland: native Wayland.
         assert!(!pen_needs_xwayland(DisplaySession::Wayland, env(&[("WAYLAND_DISPLAY", "wayland-0")]), || true, || true));
         assert!(!pen_needs_xwayland(DisplaySession::Wayland, env(&wayland), || true, || false));
         let native = [("WAYLAND_DISPLAY", "wayland-0"), ("DISPLAY", ":0"), ("PHOTOCRAFT_NATIVE_WAYLAND", "1")];
